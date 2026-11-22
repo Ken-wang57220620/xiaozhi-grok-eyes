@@ -1,0 +1,44 @@
+name: 效果反馈 / 新想法
+description: 刷成功了想晒一下，或者想要新表情、新功能、适配别的板子
+title: "[反馈] "
+labels: ["question"]
+body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 反馈类型
+      options:
+        - 刷成功了，晒一下效果
+        - 想要新表情 / 改现有的表情
+        - 想适配另一块屏或另一块板
+        - 文档 / README 有错误或不清楚
+        - 想要新功能（例如真实电量、自定义表情上传）
+        - 其它
+    validations:
+      required: true
+
+  - type: textarea
+    id: detail
+    attributes:
+      label: 详细说明
+      description: 想加什么、哪里不对、期望的效果是什么
+      placeholder: 例如：希望加一个「打哈欠」的表情，用于长时间无对话时。
+    validations:
+      required: true
+
+  - type: textarea
+    id: media
+    attributes:
+      label: 图片 / 参考链接（可选）
+      description: 直接拖图片进来即可；想晒效果的话建议拍一张暗环境的实拍图
+    validations:
+      required: false
+
+  - type: input
+    id: hardware
+    attributes:
+      label: 你的硬件（可选）
+      description: 板子型号 + 屏幕，方便判断兼容性
+      placeholder: ESP32-S3-N16R8 + 1.54" 240×240
+    validations:
+      required: false

@@ -1,0 +1,105 @@
+name: 刷机报错 / Flash issue
+description: 刷了这个固件之后有问题：黑屏、表情不出来、眼睛不动、配网上不去
+title: "[刷机] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先自查三件事，能解决 80% 的问题：
+
+        1. 五个文件是否**全部**刷了（尤其 `generated_assets.bin` → `0x800000`）
+        2. 屏幕是不是 **240×240**（240×320 或圆屏刷这套会裁切、花屏）
+        3. 主控是不是 **ESP32-S3-N16R8**（16MB Flash + 8MB PSRAM）
+
+        详细排查见 README 的「故障排查」表。
+
+  - type: input
+    id: board
+    attributes:
+      label: 开发板型号
+      description: 丝印或商品页上的型号，例如 ESP32-S3-N16R8
+      placeholder: ESP32-S3-N16R8
+    validations:
+      required: true
+
+  - type: dropdown
+    id: screen
+    attributes:
+      label: 屏幕
+      options:
+        - 1.54" ST7789 240×240 SPI（与项目一致）
+        - 240×320 长条屏
+        - GC9A01 圆屏
+        - 其它 / 不确定
+    validations:
+      required: true
+
+  - type: dropdown
+    id: memory
+    attributes:
+      label: Flash / PSRAM
+      options:
+        - 16MB Flash + 8MB PSRAM（N16R8）
+        - 8MB / 4MB Flash
+        - 不确定
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: files
+    attributes:
+      label: 这次刷了哪几个文件
+      description: 首次刷机必须五个全刷；只刷 app 会导致表情全部缺失
+      options:
+        - label: bootloader.bin → 0x0
+        - label: partition-table.bin → 0x8000
+        - label: ota_data_initial.bin → 0xd000
+        - label: xiaozhi.bin → 0x20000
+        - label: generated_assets.bin → 0x800000
+
+  - type: dropdown
+    id: symptom
+    attributes:
+      label: 具体现象
+      options:
+        - 全黑，串口也没有任何日志
+        - 黑屏但有串口日志
+        - 眼睛出来了，但表情一个都不切换
+        - 眼睛完全不动（说话时也不动）
+        - 顶部有白带 / 画面偏移
+        - 眼睛发灰、发白，看不清
+        - 配网 / 激活失败
+        - 其它（写在下面）
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: 串口日志
+      description: 开机后 10 秒内的日志，重点看 `Emoji not found`、`partition` 之类的行
+      render: shell
+      placeholder: |
+        I (xxx) app: ...
+    validations:
+      required: false
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 你用的系统
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 确认
+      options:
+        - label: 我已经看过 README 的「注意事项」和「故障排查」
+          required: true

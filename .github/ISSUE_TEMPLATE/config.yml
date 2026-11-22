@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 刷之前先看 README（注意事项 / 故障排查）
+    url: https://github.com/Ken-wang57220620/xiaozhi-grok-eyes#二注意事项重点
+    about: 五个文件全刷、屏必须是 240×240、首次刷完要重新激活
+  - name: 只想下载固件，不需要提问题
+    url: https://github.com/Ken-wang57220620/xiaozhi-grok-eyes/releases/latest
+    about: v1.0 预编译固件包，解压后双击 flash.bat
+  - name: 上游项目 78/xiaozhi-esp32
+    url: https://github.com/78/xiaozhi-esp32
+    about: 与本项目无关的通用小智 AI 问题请到上游提问
