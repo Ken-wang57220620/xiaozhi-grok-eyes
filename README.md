@@ -5,7 +5,7 @@
 
 > 一句话：给「小智」换一张 Grok 的脸。
 
-**不想自己编译？直接下 [v1.0 预编译固件包](https://github.com/Ken-wang57220620/xiaozhi-grok-eyes/releases/latest)，解压后双击 lash.bat 即可刷机。**
+**不想自己编译？直接下 [v1.0 预编译固件包](https://github.com/Ken-wang57220620/xiaozhi-grok-eyes/releases/latest)，解压后双击 `flash.bat` 即可刷机。**
 
 实机效果（待机 / 说话中 / 情绪切换，实拍）：
 
