@@ -1,0 +1,454 @@
+diff --git a/main/CMakeLists.txt b/main/CMakeLists.txt
+index 3d90620..31eba29 100644
+--- a/main/CMakeLists.txt
++++ b/main/CMakeLists.txt
+@@ -513,7 +513,12 @@ elseif(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI_LCD)
+     set(BOARD_TYPE "bread-compact-wifi-lcd")
+     set(BUILTIN_TEXT_FONT font_puhui_basic_16_4)
+     set(BUILTIN_ICON_FONT font_awesome_16_4)
+-    set(DEFAULT_EMOJI_COLLECTION twemoji_32)
++    # Grok 眼睛表情集（仓库内 main/assets/emoji/grok-eyes）
++    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/emoji/grok-eyes")
++        set(DEFAULT_EMOJI_COLLECTION grok-eyes)
++    else()
++        set(DEFAULT_EMOJI_COLLECTION twemoji_32)
++    endif()
+ elseif(CONFIG_BOARD_TYPE_TUDOUZI)
+     set(BOARD_TYPE "tudouzi")
+     set(BUILTIN_TEXT_FONT font_puhui_basic_14_1)
+@@ -1081,6 +1086,11 @@ function(build_default_assets_bin)
+     # Add default emoji collection if defined
+     if(DEFAULT_EMOJI_COLLECTION)
+         list(APPEND BUILD_ARGS "--emoji_collection" "${DEFAULT_EMOJI_COLLECTION}")
++        # 仓库内自带表情集：改动 GIF 时触发重新打包
++        file(GLOB REPO_EMOJI_FILES CONFIGURE_DEPENDS
++            "${CMAKE_CURRENT_SOURCE_DIR}/assets/emoji/${DEFAULT_EMOJI_COLLECTION}/*"
++        )
++        list(APPEND DEFAULT_ASSETS_DEPENDENCIES ${REPO_EMOJI_FILES})
+     endif()
+ 
+     # Add default assets extra files if defined
+@@ -1098,6 +1108,7 @@ function(build_default_assets_bin)
+         DEPENDS
+             ${SDKCONFIG}
+             ${PROJECT_DIR}/scripts/build_default_assets.py
++            ${DEFAULT_ASSETS_DEPENDENCIES}
+         COMMENT "Building default assets.bin based on configuration"
+         VERBATIM
+     )
+diff --git a/main/application.cc b/main/application.cc
+index 0a809fa..0139041 100644
+--- a/main/application.cc
++++ b/main/application.cc
+@@ -524,12 +524,14 @@ void Application::InitializeProtocol() {
+         if (strcmp(type->valuestring, "tts") == 0) {
+             auto state = cJSON_GetObjectItem(root, "state");
+             if (strcmp(state->valuestring, "start") == 0) {
+-                Schedule([this]() {
++                Schedule([this, display]() {
+                     aborted_ = false;
++                    display->SetEmotionAnimating(true);  // 开始说话，表情动起来
+                     SetDeviceState(kDeviceStateSpeaking);
+                 });
+             } else if (strcmp(state->valuestring, "stop") == 0) {
+-                Schedule([this]() {
++                Schedule([this, display]() {
++                    display->SetEmotionAnimating(false);  // 说完话，表情静止
+                     if (GetDeviceState() == kDeviceStateSpeaking) {
+                         if (listening_mode_ == kListeningModeManualStop) {
+                             SetDeviceState(kDeviceStateIdle);
+diff --git a/main/boards/bread-compact-wifi-lcd/compact_wifi_board_lcd.cc b/main/boards/bread-compact-wifi-lcd/compact_wifi_board_lcd.cc
+index 431cc43..633873d 100644
+--- a/main/boards/bread-compact-wifi-lcd/compact_wifi_board_lcd.cc
++++ b/main/boards/bread-compact-wifi-lcd/compact_wifi_board_lcd.cc
+@@ -59,11 +59,72 @@ static const gc9a01_lcd_init_cmd_t gc9107_lcd_init_cmds[] = {
+  
+ #define TAG "CompactWifiBoardLCD"
+ 
++/* ---------------- IP5306 电源管理芯片（I2C 0x75） ---------------- */
++/* 这块板子的 IP5306 到底接在哪两个脚没有官方文档，这里开机自动扫描空闲引脚，
++   命中 0x75 就一直用它；扫不到则视为没有电池，状态栏不显示电量。 */
++#define IP5306_ADDR 0x75
++static i2c_master_bus_handle_t s_ip_bus = nullptr;
++static i2c_master_dev_handle_t s_ip_dev = nullptr;
++
++static bool Ip5306ReadReg(uint8_t reg, uint8_t* value) {
++    if (s_ip_dev == nullptr) {
++        return false;
++    }
++    uint8_t buf = reg;
++    return i2c_master_transmit_receive(s_ip_dev, &buf, 1, value, 1, 50) == ESP_OK;
++}
++
++static bool ProbeIp5306() {
++    // 排除音频(4,5,6,7,15,16)、屏幕(21,40,41,42,45,47)、LED(48)、BOOT(0)、灯(18)、USB(19,20)、UART(43,44)、八线PSRAM(33-37)
++    static const gpio_num_t kCandidates[] = {
++        GPIO_NUM_1, GPIO_NUM_2, GPIO_NUM_3, GPIO_NUM_8, GPIO_NUM_9, GPIO_NUM_10,
++        GPIO_NUM_11, GPIO_NUM_12, GPIO_NUM_13, GPIO_NUM_14, GPIO_NUM_17,
++        GPIO_NUM_38, GPIO_NUM_39,
++    };
++    const int n = sizeof(kCandidates) / sizeof(kCandidates[0]);
++    for (int i = 0; i < n; i++) {
++        for (int j = 0; j < n; j++) {
++            if (i == j) {
++                continue;
++            }
++            i2c_master_bus_config_t bus_cfg = {};
++            bus_cfg.i2c_port = I2C_NUM_0;
++            bus_cfg.sda_io_num = kCandidates[i];
++            bus_cfg.scl_io_num = kCandidates[j];
++            bus_cfg.clk_source = I2C_CLK_SRC_DEFAULT;
++            bus_cfg.glitch_ignore_cnt = 7;
++            bus_cfg.intr_priority = 0;
++            bus_cfg.flags.enable_internal_pullup = true;
++            i2c_master_bus_handle_t bus = nullptr;
++            if (i2c_new_master_bus(&bus_cfg, &bus) != ESP_OK) {
++                continue;
++            }
++            if (i2c_master_probe(bus, IP5306_ADDR, 10) == ESP_OK) {
++                i2c_device_config_t dev_cfg = {};
++                dev_cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
++                dev_cfg.device_address = IP5306_ADDR;
++                dev_cfg.scl_speed_hz = 100000;
++                if (i2c_master_bus_add_device(bus, &dev_cfg, &s_ip_dev) == ESP_OK) {
++                    s_ip_bus = bus;
++                    ESP_LOGW(TAG, "IP5306 found: SDA=GPIO%d SCL=GPIO%d", (int)kCandidates[i], (int)kCandidates[j]);
++                    return true;
++                }
++                ESP_LOGW(TAG, "IP5306 found on SDA=GPIO%d SCL=GPIO%d but add_device failed", (int)kCandidates[i], (int)kCandidates[j]);
++            }
++            i2c_del_master_bus(bus);
++        }
++    }
++    ESP_LOGW(TAG, "IP5306 not found on any free pin pair, battery icon disabled");
++    return false;
++}
++
++
+ class CompactWifiBoardLCD : public WifiBoard {
+ private:
+  
+     Button boot_button_;
+     LcdDisplay* display_;
++    bool ip5306_ready_ = false;
+ 
+     void InitializeSpi() {
+         spi_bus_config_t buscfg = {};
+@@ -120,6 +181,9 @@ private:
+ #endif
+         display_ = new SpiLcdDisplay(panel_io, panel,
+                                     DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
++        // 极简模式：全黑屏，只显示白色眼睛表情（右上角保留电量图标）
++        display_->SetEyesOnly(true);
++        display_->SetHideSubtitle(true);
+     }
+ 
+     void InitializeButtons() {
+@@ -138,6 +202,10 @@ private:
+         static LampController lamp(LAMP_GPIO);
+     }
+ 
++    void InitializeBattery() {
++        ip5306_ready_ = ProbeIp5306();
++    }
++
+ public:
+     CompactWifiBoardLCD() :
+         boot_button_(BOOT_BUTTON_GPIO) {
+@@ -145,6 +213,7 @@ public:
+         InitializeLcdDisplay();
+         InitializeButtons();
+         InitializeTools();
++        InitializeBattery();
+         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
+             GetBacklight()->RestoreBrightness();
+         }
+@@ -171,6 +240,27 @@ public:
+         return display_;
+     }
+ 
++    virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override {
++        if (!ip5306_ready_) {
++            // 这块板的 IP5306 没有把 I2C 接到 MCU，读不到真实电量，
++            // 直接不显示电量图标，避免给用户一个假的满电数值
++            return false;
++        }
++        uint8_t reg78 = 0, reg70 = 0;
++        if (!Ip5306ReadReg(0x78, &reg78)) {
++            return false;
++        }
++        Ip5306ReadReg(0x70, &reg70);
++        static const int kLevels[] = {0, 25, 50, 75};
++        int leds = (reg78 >> 5) & 0x03;                 // 0x78 高两位 = 电量格数
++        bool charge_on = (reg70 & 0x08) != 0;           // bit3 充电中
++        bool charge_full = (reg70 & 0x04) != 0;         // bit2 充满
++        level = charge_full ? 100 : kLevels[leds];
++        charging = charge_on || charge_full;
++        discharging = !charging;
++        return true;
++    }
++
+     virtual Backlight* GetBacklight() override {
+         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
+             static PwmBacklight backlight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
+diff --git a/main/boards/bread-compact-wifi-lcd/config.h b/main/boards/bread-compact-wifi-lcd/config.h
+index 12d3802..0e899a7 100644
+--- a/main/boards/bread-compact-wifi-lcd/config.h
++++ b/main/boards/bread-compact-wifi-lcd/config.h
+@@ -46,7 +46,7 @@
+ #ifdef CONFIG_LCD_ST7789_240X320
+ #define LCD_TYPE_ST7789_SERIAL
+ #define DISPLAY_WIDTH   240
+-#define DISPLAY_HEIGHT  320
++#define DISPLAY_HEIGHT  240   // 实物为 1.54" 240x240 方屏，按 320 排版会在顶部留白带
+ #define DISPLAY_MIRROR_X false
+ #define DISPLAY_MIRROR_Y false
+ #define DISPLAY_SWAP_XY false
+diff --git a/main/display/display.h b/main/display/display.h
+index 9e73014..fca4921 100644
+--- a/main/display/display.h
++++ b/main/display/display.h
+@@ -34,6 +34,8 @@ public:
+     virtual void ShowNotification(const char* notification, int duration_ms = 3000);
+     virtual void ShowNotification(const std::string &notification, int duration_ms = 3000);
+     virtual void SetEmotion(const char* emotion);
++    // 表情动画开关：仅在说话时才播放 GIF
++    virtual void SetEmotionAnimating(bool animating) {}
+     virtual void SetChatMessage(const char* role, const char* content);
+     virtual void ClearChatMessages();
+     virtual void SetTheme(Theme* theme);
+diff --git a/main/display/lcd_display.cc b/main/display/lcd_display.cc
+index be236bb..d68a738 100644
+--- a/main/display/lcd_display.cc
++++ b/main/display/lcd_display.cc
+@@ -992,6 +992,61 @@ void LcdDisplay::SetupUI() {
+     lv_obj_set_style_text_color(low_battery_label_, lv_color_white(), 0);
+     lv_obj_center(low_battery_label_);
+     lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
++
++    if (eyes_only_) {
++        ApplyEyesOnlyStyle();
++    }
++}
++
++void LcdDisplay::ApplyEyesOnlyStyle() {
++    /* 极简模式：纯黑底 + 白眼表情，顶部保留白色 WiFi 与电量图标。
++       注意：SetTheme() 会在开机后重新刷一遍主题样式，必须在这里重新覆盖。 */
++    lv_obj_t* screen = lv_screen_active();
++    if (screen != nullptr) {
++        lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
++        lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
++        lv_obj_set_style_text_color(screen, lv_color_white(), 0);
++    }
++    if (container_ != nullptr) {
++        lv_obj_set_style_bg_color(container_, lv_color_black(), 0);
++        lv_obj_set_style_bg_opa(container_, LV_OPA_COVER, 0);
++        lv_obj_set_style_bg_image_src(container_, nullptr, 0);
++    }
++    if (status_bar_ != nullptr) {
++        lv_obj_add_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
++    }
++    if (bottom_bar_ != nullptr) {
++        lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
++    }
++    if (emoji_label_ != nullptr) {
++        lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
++    }
++    if (low_battery_popup_ != nullptr) {
++        lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
++    }
++    if (top_bar_ != nullptr) {
++        lv_obj_set_style_bg_opa(top_bar_, LV_OPA_TRANSP, 0);
++        lv_obj_set_style_border_width(top_bar_, 0, 0);
++        lv_obj_add_flag(top_bar_, LV_OBJ_FLAG_HIDDEN);
++    }
++    /* 顶部图标直接从 top_bar_ 挪到 screen 上，避免 top_bar 的白底/布局把图标挤掉或盖住 */
++    if (screen != nullptr) {
++        if (network_label_ != nullptr) {
++            lv_obj_set_parent(network_label_, screen);
++            lv_obj_align(network_label_, LV_ALIGN_TOP_LEFT, 12, 6);
++            lv_obj_move_foreground(network_label_);
++            lv_obj_set_style_text_color(network_label_, lv_color_white(), 0);
++        }
++        if (battery_label_ != nullptr) {
++            lv_obj_set_parent(battery_label_, screen);
++            lv_obj_align(battery_label_, LV_ALIGN_TOP_RIGHT, -12, 6);
++            lv_obj_move_foreground(battery_label_);
++            lv_obj_set_style_text_color(battery_label_, lv_color_white(), 0);
++        }
++    }
++    if (mute_label_ != nullptr) {
++        lv_obj_add_flag(mute_label_, LV_OBJ_FLAG_HIDDEN);
++    }
+ }
+ 
+ void LcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
+@@ -1031,6 +1086,9 @@ void LcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
+ }
+ 
+ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
++    if (eyes_only_) {
++        return;  // 极简模式不显示字幕
++    }
+     if (!setup_ui_called_) {
+         ESP_LOGW(TAG, "SetChatMessage('%s', '%s') called before SetupUI() - message will be lost!", role, content);
+     }
+@@ -1084,6 +1142,10 @@ void LcdDisplay::SetEmotion(const char* emotion) {
+ 
+     auto emoji_collection = static_cast<LvglTheme*>(current_theme_)->emoji_collection();
+     auto image = emoji_collection != nullptr ? emoji_collection->GetEmojiImage(emotion) : nullptr;
++    if (image == nullptr && eyes_only_ && emoji_collection != nullptr) {
++        // 极简模式：找不到的表情一律回落到 neutral 眼睛，避免露出图标
++        image = emoji_collection->GetEmojiImage("neutral");
++    }
+     if (image == nullptr) {
+         const char* utf8 = font_awesome_get_utf8(emotion);
+         if (utf8 != nullptr && emoji_label_ != nullptr) {
+@@ -1119,6 +1181,10 @@ void LcdDisplay::SetEmotion(const char* emotion) {
+             // Set initial frame and start animation
+             lv_image_set_src(emoji_image_, gif_controller_->image_dsc());
+             gif_controller_->Start();
++            if (!emoji_animating_) {
++                // 不在说话状态：停在第一帧
++                gif_controller_->Pause();
++            }
+             
+             // Show GIF, hide others
+             lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+@@ -1287,6 +1353,11 @@ void LcdDisplay::SetTheme(Theme* theme) {
+     // Update low battery popup
+     lv_obj_set_style_bg_color(low_battery_popup_, lvgl_theme->low_battery_color(), 0);
+ 
++    // 主题刷新会重设白底/黑字，极简模式必须在此之后重新覆盖，否则顶部会残留白条
++    if (eyes_only_) {
++        ApplyEyesOnlyStyle();
++    }
++
+     // No errors occurred. Save theme to settings
+     Display::SetTheme(lvgl_theme);
+ }
+@@ -1308,3 +1379,31 @@ void LcdDisplay::SetHideSubtitle(bool hide) {
+         }
+     }
+ }
++
++void LcdDisplay::SetEyesOnly(bool enable) {
++    DisplayLockGuard lock(this);
++    eyes_only_ = enable;
++    if (!setup_ui_called_) {
++        // SetupUI 时会按 eyes_only_ 应用一次
++        return;
++    }
++    if (enable) {
++        ApplyEyesOnlyStyle();
++    }
++}
++
++void LcdDisplay::SetEmotionAnimating(bool animating) {
++    DisplayLockGuard lock(this);
++    if (emoji_animating_ == animating) {
++        return;
++    }
++    emoji_animating_ = animating;
++    if (gif_controller_) {
++        if (animating) {
++            gif_controller_->Resume();
++        } else {
++            gif_controller_->Pause();
++        }
++    }
++}
++
+diff --git a/main/display/lcd_display.h b/main/display/lcd_display.h
+index e5be55e..b6e87e2 100644
+--- a/main/display/lcd_display.h
++++ b/main/display/lcd_display.h
+@@ -35,6 +35,10 @@ protected:
+     esp_timer_handle_t preview_timer_ = nullptr;
+     std::unique_ptr<LvglImage> preview_image_cached_ = nullptr;
+     bool hide_subtitle_ = false;  // Control whether to hide chat messages/subtitles
++    bool eyes_only_ = false;      // 极简模式：全黑屏，只留表情
++    bool emoji_animating_ = false; // 表情 GIF 是否在播放（仅说话时播放）
++    // 应用极简样式（调用者需已持有 DisplayLockGuard）
++    void ApplyEyesOnlyStyle();
+ 
+     void InitializeLcdThemes();
+     virtual bool Lock(int timeout_ms = 0) override;
+@@ -47,7 +51,9 @@ protected:
+ public:
+     ~LcdDisplay();
+     virtual void SetEmotion(const char* emotion) override;
+-    virtual void SetChatMessage(const char* role, const char* content) override;
++    virtual void SetEmotionAnimating(bool animating) override;
++    // 极简模式：全黑背景、隐藏状态栏/字幕/图标，只显示表情
++    void SetEyesOnly(bool enable);    virtual void SetChatMessage(const char* role, const char* content) override;
+     virtual void ClearChatMessages() override;
+     virtual void SetPreviewImage(std::unique_ptr<LvglImage> image) override;
+     virtual void SetupUI() override;
+diff --git a/scripts/build_default_assets.py b/scripts/build_default_assets.py
+index 90cee7d..2b8aabe 100755
+--- a/scripts/build_default_assets.py
++++ b/scripts/build_default_assets.py
+@@ -225,6 +225,19 @@ def process_emoji_collection(emoji_collection_dir, assets_dir):
+     # Check if this is otto-gif collection
+     is_otto_gif = 'otto-emoji-gif-component' in emoji_collection_dir or emoji_collection_dir.endswith('otto-gif')
+     
++    # 可选：表情目录内 aliases.json，把别名表情映射到已存在的 GIF
++    # 格式：{"happy": "neutral.gif", "confused": "thinking.gif"}
++    aliases = {}
++    aliases_path = os.path.join(emoji_collection_dir, 'aliases.json')
++    if os.path.isfile(aliases_path):
++        try:
++            with open(aliases_path, 'r', encoding='utf-8') as f:
++                aliases = json.load(f)
++            print(f"Loaded emoji aliases from {aliases_path}: {len(aliases)} entries")
++        except Exception as e:
++            print(f"Warning: failed to parse {aliases_path}: {e}")
++            aliases = {}
++    
+     # Otto GIF emoji aliases mapping
+     otto_gif_aliases = {
+         "staticstate": ["neutral", "relaxed", "sleepy", "idle"],
+@@ -260,6 +273,18 @@ def process_emoji_collection(emoji_collection_dir, assets_dir):
+                                 "file": file
+                             })
+     
++    # 追加 aliases.json 里的别名条目（目标文件必须在已收集的列表中）
++    if aliases:
++        known_files = {item["file"] for item in emoji_list}
++        for alias_name, target_file in aliases.items():
++            if target_file in known_files:
++                emoji_list.append({
++                    "name": alias_name,
++                    "file": target_file
++                })
++            else:
++                print(f"Warning: alias '{alias_name}' points to missing file '{target_file}', skipped")
++    
+     return emoji_list
+ 
+ 
+@@ -718,6 +743,13 @@ def get_emoji_collection_path(default_emoji_collection, xiaozhi_fonts_path, proj
+     """
+     if not default_emoji_collection:
+         return None
++
++    # 仓库内自带表情集：<project_root>/main/assets/emoji/<name>
++    if project_root:
++        repo_emoji_path = os.path.join(project_root, 'main', 'assets', 'emoji', default_emoji_collection)
++        if os.path.isdir(repo_emoji_path):
++            return repo_emoji_path
++
+     
+     # Special handling for otto-gif collection
+     if default_emoji_collection == 'otto-gif':
+diff --git a/sdkconfig.defaults b/sdkconfig.defaults
+index ae6b193..8b19339 100644
+--- a/sdkconfig.defaults
++++ b/sdkconfig.defaults
+@@ -76,3 +76,5 @@ CONFIG_LV_USE_WIN=n
+ CONFIG_LV_BUILD_EXAMPLES=n
+ CONFIG_LV_BUILD_DEMOS=n
+ 
++
++CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI_LCD=y
