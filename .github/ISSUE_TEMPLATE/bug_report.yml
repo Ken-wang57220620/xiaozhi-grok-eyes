@@ -1,7 +1,7 @@
 name: 刷机报错 / Flash issue
 description: 刷了这个固件之后有问题：黑屏、表情不出来、眼睛不动、配网上不去
 title: "[刷机] "
-labels: ["bug"]
+labels: ["bug", "flash"]
 body:
   - type: markdown
     attributes:
